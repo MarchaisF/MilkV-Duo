@@ -24,7 +24,7 @@ The T-Head XuanTie C906 core complies with a draft version of the vectorial exte
     SDK=/path/to/duo-buildroot-sdk-v2
     BOARD=sg2000_milkv_duos_musl_riscv64_emmc
     CHIP=cv181x
-    # Copier le kernel (c'est un fork custom Sophgo, pas le kernel.org standard)
+    # Kernel copy (It's a Sophgo custom fork, not a standard vanilla kernel.org)
     cp -r $SDK/linux_5.10 ~/MilkV-Duo/linux_5.10
 
 Critical point: the DTS files are outside the kernel. The SDK symlinks in the kernel at build time. We must copy them manually
@@ -53,7 +53,7 @@ Critical point: the DTS files are outside the kernel. The SDK symlinks in the ke
     cd ~/MilkV-Duo/linux_5.10
     BUILD_DIR=./output
     # Apply defconfig in the out-of-tree output directory
-    make O=$BUILD_DIR milkv_duo_defconfig
+    make O=$BUILD_DIR cvitek_${BOARD}_defconfig
     
     # (Optionnal) tune
     make O=$BUILD_DIR menuconfig
