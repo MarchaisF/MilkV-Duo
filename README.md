@@ -48,7 +48,15 @@ Critical point: the DTS files are outside the kernel. The SDK symlinks in the ke
     export ARCH=riscv
     export CROSS_COMPILE=riscv64-unknown-linux-musl-
 
-## Step 4 : Configure and compile kernel
+## Step 4 : dtb creation prerequisites
+
+    cd ~/MilkV-Duo/linux_5.10
+    mkdir -p scripts/dtc/include-prefixes
+    python3 $SDK/build/scripts/mmap_conv.py --type h $SDK/build/boards/cv181x/sg2000_milkv_duos_musl_riscv64_emmc/memmap.py  scripts/dtc/include-prefixes/cvi_board_memmap.h
+    cp $SDK/build/boards/default/dts/cv181x/*.dtsi ./arch/riscv/boot/dts/cvitek
+    cp $SDK/build/boards/default/dts/cv181x_riscv/*.dtsi ./arch/riscv/boot/dts/cvitek
+    
+## Step 5 : Configure and compile kernel
 
     cd ~/MilkV-Duo/linux_5.10
     BUILD_DIR=./output
@@ -59,10 +67,11 @@ Critical point: the DTS files are outside the kernel. The SDK symlinks in the ke
     make O=$BUILD_DIR menuconfig
     
     # Compile kernel + modules
-    make O=$BUILD_DIR -j$(nproc) Image modules
+    make O=$BUILD_DIR -j$(nproc) Image modules dtbs
 
 The output is here :
 
-> out/arch/riscv/boot/Image ← kernel image
-out/vmlinux ← complete ELF (debug)
+> output/arch/riscv/boot/Image ← kernel image
+> output/arch/riscv/boot/dts/cvitek/sg2000_milkv_duos_musl_riscv64_emmc.dtb ← device tree
+> output/vmlinux ← complete ELF (debug)
 
