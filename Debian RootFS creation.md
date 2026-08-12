@@ -13,7 +13,7 @@
     sudo mmdebstrap \
       --arch=arm64 \
       --variant=minbase \
-      --include=systemd,systemd-sysv,dbus,iproute2,isc-dhcp-client,nfs-common,openssh-server,nano,ca-certificates udev vim-tiny locales systemd-timesyncd kmod \
+      --include=systemd,systemd-sysv,dbus,iproute2,isc-dhcp-client,nfs-common,openssh-server,nano,ca-certificates,udev,vim-tiny,locales,systemd-timesyncd,kmod \
       trixie \
       ./duos-rootfs \
       http://deb.debian.org/debian
