@@ -34,7 +34,7 @@
     echo "PermitRootLogin yes" >> /etc/ssh/sshd_config
     exit
 
-## Getting a working serial console
+## Getting a working serial console (no more needed, added at install)
 
     apt update && apt install -y udev
     systemctl status systemd-udevd
@@ -46,9 +46,12 @@
     dpkg-reconfigure locales
     134
 
-## NTP server
+## NTP server (no more needed, added at install)
 
     date -s "2026-08-03 23:38:00"
     apt install systemd-timesyncd
     timedatectl set-ntp true
-    timedatectl status
+
+## Timezone setting
+
+    sudo timedatectl set-timezone Europe/Paris
