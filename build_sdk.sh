@@ -135,29 +135,6 @@ SOPHGO_DEPLOYED_MODELS_LIST=()
 KERNEL_FRAGMENTS_DIR="${TOP_DIR}/kernel_fragments"
 TFTP_DEPLOY_DIR="${TOP_DIR}/tftp_deploy"
 
-if [[ "${CLEAN_BUILD}" -eq 1 ]]; then
-    echo "--clean: removing build artefacts (compiled objects, staging, rootfs, tftp_deploy)..."
-    rm -rf "${TARGET_ROOTFS}" "${STAGING_DIR}" "${HOST_TOOLS_DIR}" "${TFTP_DEPLOY_DIR}"
-    # Remove per-component build directories so every library is rebuilt from source.
-    for build_dir in \
-        flatbuffers/build_host flatbuffers/build_arm \
-        cvibuilder/build_arm cnpy/build_arm cvikernel/build_arm \
-        cviruntime/build_arm cvimath/build_arm ive/build_arm; do
-        rm -rf "${TOP_DIR}/${build_dir}"
-    done
-    rm -rf oss/build_zlib cvi_rtsp/prebuilt cvi_rtsp/install
-    rm -rf tdl_sdk/tmp tdl_sdk/install
-    # Mirror clean_middleware() from envsetup_milkv.sh: use "make clean" (not
-    # clean_all).  The audio module ships precompiled .o files in obj/ tracked
-    # in git — "make clean_all" would wipe obj/ and then "make all" would fail
-    # trying to recompile from the absent C sources.  "make clean" removes the
-    # built libs (lib/libcvi_audio.*) but leaves obj/ intact, exactly like the
-    # official SDK's clean_middleware function does.
-    ( cd cvi_mpi && make clean && make uninstall ) || true
-    # Downloads (host-tools, tdl_models) are intentionally preserved.
-    # Use --mrproper to also remove them.
-fi
-
 # --- Ensure SDK toolchain (host-tools) is present --------------------------
 # The SDK's host-tools directory (~1 GB of cross-compilers) is not part of the
 # main SDK git repository.  The official build.sh clones it automatically; we
@@ -196,6 +173,54 @@ set -u -o pipefail
 
 # Put the cross-compiler in PATH for the rest of the script (and all subshells).
 export PATH="${CROSS_COMPILE_PATH}/bin:${PATH}"
+
+# --clean: remove build artefacts now that envsetup has defined all path variables
+# (KERNEL_PATH, KERNEL_OUTPUT_FOLDER, SYSTEM_OUT_DIR, etc.).
+# This mirrors the individual clean_* functions from envsetup_milkv.sh:
+#   - clean_middleware  : make clean (preserves audio obj/) + make uninstall
+#   - clean_osdrv       : make clean with KERNEL_DIR and INSTALL_DIR
+#   - clean_cvi_rtsp    : BUILD_SERVICE=1 make clean  (removes cvi_rtsp/install)
+#   - clean_tdl_sdk     : build_tdl_sdk.sh clean (removes tmp/ and install/)
+#   - clean_3rd_party   : rm -rf oss/build
+# cmake-based components (flatbuffers, cvibuilder, cnpy, cvikernel, cviruntime,
+# cvimath, ive) have no dedicated clean_ in envsetup; deleting their build dirs
+# is the correct approach.
+if [[ "${CLEAN_BUILD}" -eq 1 ]]; then
+    echo "--clean: removing build artefacts (compiled objects, staging, rootfs, tftp_deploy)..."
+    rm -rf "${TARGET_ROOTFS}" "${STAGING_DIR}" "${HOST_TOOLS_DIR}" "${TFTP_DEPLOY_DIR}"
+
+    # cmake-based components: delete build directories
+    for build_dir in \
+        flatbuffers/build_host flatbuffers/build_arm \
+        cvibuilder/build_arm cnpy/build_arm cvikernel/build_arm \
+        cviruntime/build_arm cvimath/build_arm ive/build_arm; do
+        rm -rf "${TOP_DIR}/${build_dir}"
+    done
+
+    # oss / 3rd-party (mirrors clean_3rd_party)
+    rm -rf oss/build_zlib
+
+    # cvi_rtsp (mirrors clean_cvi_rtsp: BUILD_SERVICE=1 make clean)
+    ( cd cvi_rtsp && BUILD_SERVICE=1 make clean ) || true
+    rm -rf cvi_rtsp/prebuilt
+
+    # tdl_sdk (mirrors clean_tdl_sdk: build_tdl_sdk.sh clean)
+    rm -rf tdl_sdk/tmp tdl_sdk/install
+
+    # cvi_mpi (mirrors clean_middleware: "make clean" then "make uninstall")
+    # "make clean" preserves audio/obj/ (precompiled .o tracked in git).
+    # "make clean_all" would wipe obj/ and break the next "make all".
+    ( cd cvi_mpi && make clean && make uninstall ) || true
+
+    # osdrv (mirrors clean_osdrv: make clean with KERNEL_DIR and INSTALL_DIR)
+    ( cd osdrv && make \
+        KERNEL_DIR="${KERNEL_PATH}/${KERNEL_OUTPUT_FOLDER}" \
+        INSTALL_DIR="${STAGING_DIR}/ko" \
+        clean ) || true
+
+    # Downloads (host-tools, tdl_models) are intentionally preserved.
+    # Use --mrproper to also remove them.
+fi
 
 # Stage the display device-tree overlays now that PROJECT_FULLNAME/CHIP_ARCH
 # (set by envsetup_milkv.sh) tell us where this board's dts_arm64/ dir is.
