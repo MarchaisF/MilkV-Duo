@@ -468,6 +468,11 @@ build_kernel_standalone
 KERNEL_HEADERS_ROOT="${KERNEL_PATH}/${KERNEL_OUTPUT_FOLDER}/arm64/usr"
 
 # --- 9. Ive ---
+# tpu_ive.cpp uses %ld to print CVI_U64 (unsigned long long) arguments, which
+# triggers -Werror=format= with aarch64-linux-gnu-g++.  Patch in-place before
+# building; the fix is idempotent (sed does nothing if already %lld).
+sed -i 's/%ld,plane0 addr:%ld/%lld,plane0 addr:%lld/g' ive/src/tpu_ive.cpp
+
 build_and_install "ive" \
     "mkdir -p ive/build_arm && cd ive/build_arm && cmake .. -DCMAKE_TOOLCHAIN_FILE=${TOP_DIR}/cviruntime/scripts/toolchain-aarch64-linux.cmake -DCMAKE_INSTALL_PREFIX=${STAGING_DIR} -DCVI_PLATFORM=CV181X -DMLIR_SDK_ROOT=${STAGING_DIR} -DMIDDLEWARE_SDK_ROOT=${STAGING_DIR} -DKERNEL_ROOT=${KERNEL_HEADERS_ROOT} -DKERNEL_HEADERS_ROOT=${KERNEL_HEADERS_ROOT} -DTC_PATH=${CROSS_COMPILE_PATH}/bin/ && make -j$(nproc)" \
     "cd ive/build_arm && make install"
