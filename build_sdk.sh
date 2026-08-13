@@ -24,7 +24,8 @@ SDK_REF="${SDK_REF:-main}"
 BOARD="${BOARD:-milkv-duos-glibc-arm64-emmc}"
 WORKDIR="$(pwd)/sdk_build"
 TARGET_ROOTFS="target_rootfs"
-CLEAN_BUILD=0
+CLEAN_BUILD=0      # --clean  : remove build artefacts, keep downloads
+MRPROPER_BUILD=0   # --mrproper : also wipe downloads and SDK clone (full reset)
 WITH_DVB=0
 SKIP_SOPHGO_TDL_MODELS="${SKIP_SOPHGO_TDL_MODELS:-0}"
 
@@ -48,8 +49,14 @@ show_help() {
     echo "                       (default: target_rootfs)"
     echo "  --with-dvb           Keep the vendor's default DVB/DTV tuner modules"
     echo "                       (disabled by default, see resources/kernel_fragments)"
-    echo "  --clean              Wipe the working directory and re-clone/rebuild"
-    echo "                       everything from scratch, for a fully repeatable build."
+    echo "  --clean              Remove all build artefacts (compiled objects, staging"
+    echo "                       dir, rootfs, kernel build dir) but keep downloaded"
+    echo "                       sources and toolchains (host-tools, tdl_models)."
+    echo "                       Like 'make clean' in the Linux kernel."
+    echo "  --mrproper           Full reset: remove everything including downloads"
+    echo "                       (host-tools, tdl_models) and the SDK clone itself,"
+    echo "                       then re-clone and rebuild from scratch."
+    echo "                       Like 'make mrproper' in the Linux kernel."
     echo "  --skip-sophgo-tdl-models"
     echo "                       Skip cloning/updating sophgo/tdl_models (offline build)"
     echo "  --help               Show this help message"
@@ -77,6 +84,8 @@ while [[ $# -gt 0 ]]; do
             WITH_DVB=1; shift ;;
         --clean)
             CLEAN_BUILD=1; shift ;;
+        --mrproper)
+            MRPROPER_BUILD=1; CLEAN_BUILD=1; shift ;;
         --skip-sophgo-tdl-models)
             SKIP_SOPHGO_TDL_MODELS=1; shift ;;
         *)
@@ -95,8 +104,10 @@ if [[ ! -d "${RESOURCES_DIR}/kernel_fragments" ]]; then
 fi
 
 # --- Clone (or reuse) the SDK ---------------------------------------------
-if [[ "${CLEAN_BUILD}" -eq 1 ]]; then
-    echo "Performing a clean, from-scratch build (--clean): wiping ${WORKDIR}..."
+# --mrproper wipes the entire workdir (SDK clone + downloads).
+# --clean alone only removes build artefacts (handled later, after cd into WORKDIR).
+if [[ "${MRPROPER_BUILD}" -eq 1 ]]; then
+    echo "--mrproper: wiping entire workdir ${WORKDIR} (SDK clone + all downloads)..."
     rm -rf "${WORKDIR}"
 fi
 
@@ -125,7 +136,7 @@ KERNEL_FRAGMENTS_DIR="${TOP_DIR}/kernel_fragments"
 TFTP_DEPLOY_DIR="${TOP_DIR}/tftp_deploy"
 
 if [[ "${CLEAN_BUILD}" -eq 1 ]]; then
-    echo "Removing previous build outputs in ${TOP_DIR} (--clean)..."
+    echo "--clean: removing build artefacts (compiled objects, staging, rootfs, tftp_deploy)..."
     rm -rf "${TARGET_ROOTFS}" "${STAGING_DIR}" "${HOST_TOOLS_DIR}" "${TFTP_DEPLOY_DIR}"
     # Remove per-component build directories so every library is rebuilt from source.
     for build_dir in \
@@ -137,6 +148,8 @@ if [[ "${CLEAN_BUILD}" -eq 1 ]]; then
     rm -rf oss/build_zlib cvi_rtsp/prebuilt cvi_rtsp/install
     rm -rf tdl_sdk/tmp tdl_sdk/install
     ( cd cvi_mpi && make clean_all ) || true
+    # Downloads (host-tools, tdl_models) are intentionally preserved.
+    # Use --mrproper to also remove them.
 fi
 
 # --- Ensure SDK toolchain (host-tools) is present --------------------------
@@ -269,9 +282,26 @@ build_and_install "cvimath" \
     "cd cvimath/build_arm && make install"
 
 # --- 8. Cvi_mpi (ISP and Sensors) ---
+# The public SDK repo does not ship the cvi_audio C sources (cvi_aud_internal.c,
+# cvi_audio_interface_tinyalsa.c, etc.) — they remain proprietary.  We therefore:
+#   1. Remove 'audio' from SUB_DIRS so "make all" does not attempt to compile them.
+#   2. Run "make install" directly in the audio sub-directory, which only copies
+#      the prebuilt third-party audio libs (libtinyalsa, libaacdec2, …) into
+#      cvi_mpi/lib/ — no compilation required.
+# This preserves full audio support (libtinyalsa, AAC, MP3 codecs) in the rootfs
+# while avoiding the missing-source build failure.
+sed -i 's/^\(SUB_DIRS\s*=\s*.*\)\baudio\b[[:space:]]*/\1/' \
+    cvi_mpi/modules/Makefile
+
 build_and_install "cvi_mpi" \
     "cd cvi_mpi && make all" \
     "cd cvi_mpi && make install DESTDIR=${STAGING_DIR}"
+
+# Install the audio prebuilt libs separately (no compilation needed).
+echo "Installing cvi_mpi audio prebuilt libs..."
+( cd cvi_mpi/modules/audio && make install ) || {
+    echo "Warning: cvi_mpi audio install step failed — audio libs may be missing"
+}
 
 # Stage MPI headers for downstream consumers such as ive.
 mkdir -p "${STAGING_DIR}/include"
