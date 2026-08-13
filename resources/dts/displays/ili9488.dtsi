@@ -1,0 +1,29 @@
+/ {
+    /* Définition du rétroéclairage */
+    backlight_ili9488: backlight-ili9488 {
+        compatible = "gpio-backlight";
+        gpios = <&porta 20 GPIO_ACTIVE_HIGH>;
+        default-on;
+    };
+};
+
+&spi0 {
+    status = "okay";
+
+    /* Disable the vendor's default generic spidev child (same chip-select 0)
+     * so it doesn't compete with the display driver below. */
+    spidev@0 {
+        status = "disabled";
+    };
+
+    display@0 {
+        compatible = "ilitek,ili9486";
+        reg = <0>;
+        spi-max-frequency = <32000000>;
+        rotation = <90>;
+
+        dc-gpios = <&porta 18 GPIO_ACTIVE_HIGH>;
+        reset-gpios = <&porta 19 GPIO_ACTIVE_LOW>;
+        backlight = <&backlight_ili9488>;
+    };
+};
