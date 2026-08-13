@@ -156,6 +156,7 @@ mkdir -p "${KERNEL_FRAGMENTS_DIR}"
 cp -f "${RESOURCES_DIR}/kernel_fragments/nfs-tftp-boot.config" "${KERNEL_FRAGMENTS_DIR}/"
 cp -f "${RESOURCES_DIR}/kernel_fragments/spi-displays.config" "${KERNEL_FRAGMENTS_DIR}/"
 cp -f "${RESOURCES_DIR}/kernel_fragments/disable-dvb.config" "${KERNEL_FRAGMENTS_DIR}/"
+cp -f "${RESOURCES_DIR}/kernel_fragments/systemd-compat.config" "${KERNEL_FRAGMENTS_DIR}/"
 
 # Create target and staging directories
 mkdir -p "${TARGET_ROOTFS}"
@@ -417,9 +418,13 @@ build_kernel_standalone() {
         exit 1
     }
 
-    # Merge the NFS/TFTP + SPI display (+ optional DVB-disable) fragments
-    # onto the vendor defconfig, then let Kconfig resolve dependencies again.
-    local fragments=("${KERNEL_FRAGMENTS_DIR}/nfs-tftp-boot.config" "${KERNEL_FRAGMENTS_DIR}/spi-displays.config")
+    # Merge all fragments: NFS/TFTP + SPI displays + systemd cgroups compat
+    # + optional DVB-disable, onto the vendor defconfig.
+    local fragments=(
+        "${KERNEL_FRAGMENTS_DIR}/nfs-tftp-boot.config"
+        "${KERNEL_FRAGMENTS_DIR}/spi-displays.config"
+        "${KERNEL_FRAGMENTS_DIR}/systemd-compat.config"
+    )
     if [[ "${WITH_DVB}" -ne 1 ]]; then
         strip_dvb_config "${kernel_output_dir}/.config"
         fragments+=("${KERNEL_FRAGMENTS_DIR}/disable-dvb.config")
