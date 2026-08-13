@@ -147,7 +147,13 @@ if [[ "${CLEAN_BUILD}" -eq 1 ]]; then
     done
     rm -rf oss/build_zlib cvi_rtsp/prebuilt cvi_rtsp/install
     rm -rf tdl_sdk/tmp tdl_sdk/install
-    ( cd cvi_mpi && make clean_all ) || true
+    # Mirror clean_middleware() from envsetup_milkv.sh: use "make clean" (not
+    # clean_all).  The audio module ships precompiled .o files in obj/ tracked
+    # in git — "make clean_all" would wipe obj/ and then "make all" would fail
+    # trying to recompile from the absent C sources.  "make clean" removes the
+    # built libs (lib/libcvi_audio.*) but leaves obj/ intact, exactly like the
+    # official SDK's clean_middleware function does.
+    ( cd cvi_mpi && make clean && make uninstall ) || true
     # Downloads (host-tools, tdl_models) are intentionally preserved.
     # Use --mrproper to also remove them.
 fi
@@ -282,26 +288,13 @@ build_and_install "cvimath" \
     "cd cvimath/build_arm && make install"
 
 # --- 8. Cvi_mpi (ISP and Sensors) ---
-# The public SDK repo does not ship the cvi_audio C sources (cvi_aud_internal.c,
-# cvi_audio_interface_tinyalsa.c, etc.) — they remain proprietary.  We therefore:
-#   1. Remove 'audio' from SUB_DIRS so "make all" does not attempt to compile them.
-#   2. Run "make install" directly in the audio sub-directory, which only copies
-#      the prebuilt third-party audio libs (libtinyalsa, libaacdec2, …) into
-#      cvi_mpi/lib/ — no compilation required.
-# This preserves full audio support (libtinyalsa, AAC, MP3 codecs) in the rootfs
-# while avoiding the missing-source build failure.
-sed -i 's/^\(SUB_DIRS\s*=\s*.*\)\baudio\b[[:space:]]*/\1/' \
-    cvi_mpi/modules/Makefile
-
+# The audio module compiles from precompiled .o files shipped in obj/ (tracked
+# in git) rather than from .c sources.  "make all" works normally as long as
+# obj/ is intact — which it is after a git clone or a --clean (make clean
+# preserves obj/; only make clean_all would wipe it).
 build_and_install "cvi_mpi" \
     "cd cvi_mpi && make all" \
     "cd cvi_mpi && make install DESTDIR=${STAGING_DIR}"
-
-# Install the audio prebuilt libs separately (no compilation needed).
-echo "Installing cvi_mpi audio prebuilt libs..."
-( cd cvi_mpi/modules/audio && make install ) || {
-    echo "Warning: cvi_mpi audio install step failed — audio libs may be missing"
-}
 
 # Stage MPI headers for downstream consumers such as ive.
 mkdir -p "${STAGING_DIR}/include"
