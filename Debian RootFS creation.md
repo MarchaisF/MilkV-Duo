@@ -13,7 +13,7 @@
     sudo mmdebstrap \
       --arch=arm64 \
       --variant=minbase \
-      --include=systemd,systemd-sysv,dbus,iproute2,isc-dhcp-client,nfs-common,openssh-server,nano,ca-certificates,udev,vim-tiny,locales,systemd-timesyncd,kmod,sudo,libatomic1 \
+      --include=systemd,systemd-sysv,dbus,iproute2,isc-dhcp-client,nfs-common,openssh-server,nano,ca-certificates,udev,vim-tiny,locales,systemd-timesyncd,kmod,sudo,libatomic1,network-manager,wpasupplicant,bluetooth,bluez \
       trixie \
       ./duos-rootfs \
       http://deb.debian.org/debian
@@ -23,6 +23,7 @@
 ## Hostname and root password definition
 
     echo "duos-debian" > /etc/hostname
+    echo "127.0.0.1 MilkV-DuoS" >> /etc/hosts
     passwd root
 
 ## Automatic NFS root mount setting
