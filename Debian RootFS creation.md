@@ -13,7 +13,7 @@
     sudo mmdebstrap \
       --arch=arm64 \
       --variant=minbase \
-      --include=systemd,systemd-sysv,dbus,iproute2,isc-dhcp-client,nfs-common,openssh-server,nano,ca-certificates,udev,vim-tiny,locales,systemd-timesyncd,kmod,sudo,libatomic1,network-manager,wpasupplicant,bluetooth,bluez \
+      --include=systemd,systemd-sysv,dbus,iproute2,isc-dhcp-client,nfs-common,openssh-server,nano,ca-certificates,udev,vim-tiny,locales,systemd-timesyncd,kmod,sudo,libatomic1,network-manager,wpasupplicant,bluetooth,bluez,libubootenv-tool \
       trixie \
       ./duos-rootfs \
       http://deb.debian.org/debian
@@ -56,3 +56,9 @@
 ## Timezone setting
 
     sudo timedatectl set-timezone Europe/Paris
+
+## U-boot environement variables edition from command line
+    cat << 'EOF' > /etc/fw_env.config
+    # Device        Offset      Env. size   Sector size
+    /dev/mmcblk0    0xa00000    0x20000     0x200
+    EOF
