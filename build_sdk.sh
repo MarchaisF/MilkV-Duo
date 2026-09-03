@@ -28,6 +28,8 @@ CLEAN_BUILD=0      # --clean  : remove build artefacts, keep downloads
 MRPROPER_BUILD=0   # --mrproper : also wipe downloads and SDK clone (full reset)
 WITH_DVB=0
 SKIP_SOPHGO_TDL_MODELS="${SKIP_SOPHGO_TDL_MODELS:-0}"
+MENUCONFIG=0       # --menuconfig : open an interactive `make menuconfig` before building the kernel
+KERNEL_ONLY=0      # --kernel-only : stop after kernel Image + modules + dtbs, skip the rest of the SDK
 
 # Function to show help
 show_help() {
@@ -47,8 +49,9 @@ show_help() {
     echo "                       (default: milkv-duos-glibc-arm64-emmc)"
     echo "  --target-rootfs DIR  Rootfs output path, relative to --workdir"
     echo "                       (default: target_rootfs)"
-    echo "  --with-dvb           Keep the vendor's default DVB/DTV tuner modules"
-    echo "                       (disabled by default, see resources/kernel_fragments)"
+    echo "  --with-dvb           Keep the vendor's default DVB/DTV tuner and other"
+    echo "                       multimedia ancillary drivers (dropped by default,"
+    echo "                       see resources/kernel_fragments)"
     echo "  --clean              Remove all build artefacts (compiled objects, staging"
     echo "                       dir, rootfs, kernel build dir) but keep downloaded"
     echo "                       sources and toolchains (host-tools, tdl_models)."
@@ -59,6 +62,28 @@ show_help() {
     echo "                       Like 'make mrproper' in the Linux kernel."
     echo "  --skip-sophgo-tdl-models"
     echo "                       Skip cloning/updating sophgo/tdl_models (offline build)"
+    echo "  --menuconfig         Ensure the kernel source, toolchain and merged config"
+    echo "                       are present (cloning/preparing them if missing), open"
+    echo "                       an interactive 'make menuconfig' on the kernel .config,"
+    echo "                       then exit without building anything. Re-run without"
+    echo "                       this flag (optionally with --kernel-only) to build with"
+    echo "                       your changes -- they are saved back into the kernel"
+    echo "                       output dir's .config and are picked up automatically"
+    echo "                       (olddefconfig only fills in new symbols, it won't undo"
+    echo "                       your edits)."
+    echo "  --kernel-only        Only (re)build the kernel Image + modules + dtbs, then"
+    echo "                       exit -- skip building the rest of the SDK/rootfs. On a"
+    echo "                       fresh --workdir (or after --mrproper) this also clones"
+    echo "                       the SDK as a partial, sparse checkout (build/, device/,"
+    echo "                       linux_5.10/ only), so only the kernel source and board"
+    echo "                       configs are downloaded instead of the whole ~multi-GB"
+    echo "                       SDK. If --workdir already contains a full SDK checkout,"
+    echo "                       it is restricted to those paths for this run, but any"
+    echo "                       git objects already downloaded remain in .git. Re-run"
+    echo "                       later without --kernel-only to transparently widen the"
+    echo "                       checkout and build the rest of the SDK."
+    echo "                       Combine with --menuconfig to tweak the kernel config"
+    echo "                       and do a quick standalone kernel build."
     echo "  --help               Show this help message"
 }
 
@@ -88,6 +113,10 @@ while [[ $# -gt 0 ]]; do
             MRPROPER_BUILD=1; CLEAN_BUILD=1; shift ;;
         --skip-sophgo-tdl-models)
             SKIP_SOPHGO_TDL_MODELS=1; shift ;;
+        --menuconfig)
+            MENUCONFIG=1; shift ;;
+        --kernel-only)
+            KERNEL_ONLY=1; shift ;;
         *)
             echo "Unknown option: $1"
             show_help
@@ -111,14 +140,72 @@ if [[ "${MRPROPER_BUILD}" -eq 1 ]]; then
     rm -rf "${WORKDIR}"
 fi
 
+# duo-buildroot-sdk-v2 is a single monorepo: the Linux kernel tree
+# (linux_5.10/, referenced as KERNEL_SRC by envsetup_milkv.sh) lives in the
+# very same git repository as buildroot/, oss/, tdl_sdk/ and everything else.
+# A plain "git clone" therefore always downloads the *entire* SDK regardless
+# of --kernel-only. To actually avoid that when only the kernel is wanted, do
+# a partial clone (--filter=blob:none, so file contents are fetched lazily)
+# restricted via sparse-checkout to just the paths needed to configure and
+# build the kernel standalone: build/ (envsetup, board defconfigs, dts) and
+# device/ (board configs) and linux_5.10/ (the kernel source itself).
+SDK_KERNEL_ONLY_SPARSE_PATHS=(build device linux_5.10)
+
+sdk_clone_is_sparse() {
+    [[ "$(git -C "${WORKDIR}" config --bool core.sparseCheckout 2>/dev/null)" == "true" ]]
+}
+
 if [[ ! -d "${WORKDIR}/.git" ]]; then
-    echo "Cloning ${SDK_REPO_URL} (ref: ${SDK_REF}) into ${WORKDIR}..."
-    git clone --depth 1 --branch "${SDK_REF}" "${SDK_REPO_URL}" "${WORKDIR}" || {
-        echo "Failed to clone ${SDK_REPO_URL}"
-        exit 1
-    }
+    if [[ "${KERNEL_ONLY}" -eq 1 ]]; then
+        echo "--kernel-only: cloning ${SDK_REPO_URL} (ref: ${SDK_REF}) into ${WORKDIR} with a partial, sparse checkout (build/, device/, linux_5.10/ only)..."
+        git clone --filter=blob:none --no-checkout --depth 1 --branch "${SDK_REF}" "${SDK_REPO_URL}" "${WORKDIR}" || {
+            echo "Failed to clone ${SDK_REPO_URL}"
+            exit 1
+        }
+        git -C "${WORKDIR}" sparse-checkout init --cone || {
+            echo "Failed to initialize sparse-checkout"
+            exit 1
+        }
+        git -C "${WORKDIR}" sparse-checkout set "${SDK_KERNEL_ONLY_SPARSE_PATHS[@]}" || {
+            echo "Failed to set sparse-checkout paths"
+            exit 1
+        }
+        git -C "${WORKDIR}" checkout "${SDK_REF}" || {
+            echo "Failed to checkout sparse SDK ref ${SDK_REF}"
+            exit 1
+        }
+    else
+        echo "Cloning ${SDK_REPO_URL} (ref: ${SDK_REF}) into ${WORKDIR}..."
+        git clone --depth 1 --branch "${SDK_REF}" "${SDK_REPO_URL}" "${WORKDIR}" || {
+            echo "Failed to clone ${SDK_REPO_URL}"
+            exit 1
+        }
+    fi
 else
     echo "Reusing existing SDK clone at ${WORKDIR} (use --clean for a fresh clone)."
+    if [[ "${KERNEL_ONLY}" -eq 1 ]]; then
+        if ! sdk_clone_is_sparse; then
+            echo "--kernel-only: restricting existing SDK checkout to build/, device/ and linux_5.10/..."
+            git -C "${WORKDIR}" sparse-checkout init --cone || {
+                echo "Failed to initialize sparse-checkout"
+                exit 1
+            }
+        fi
+        git -C "${WORKDIR}" sparse-checkout set "${SDK_KERNEL_ONLY_SPARSE_PATHS[@]}" || {
+            echo "Failed to set sparse-checkout paths"
+            exit 1
+        }
+    fi
+    # If a previous --kernel-only run left a sparse checkout behind but this
+    # run wants the full SDK, widen it back out (fetches the now-missing
+    # blobs on demand since the clone is only partial, not shallow-of-paths).
+    if [[ "${KERNEL_ONLY}" -ne 1 ]] && sdk_clone_is_sparse; then
+        echo "Expanding previous --kernel-only sparse checkout to a full checkout..."
+        git -C "${WORKDIR}" sparse-checkout disable || {
+            echo "Failed to disable sparse-checkout"
+            exit 1
+        }
+    fi
 fi
 
 SDK_COMMIT=$(git -C "${WORKDIR}" rev-parse HEAD)
@@ -155,7 +242,8 @@ echo "Staging kernel config fragments and display device-tree overlays..."
 mkdir -p "${KERNEL_FRAGMENTS_DIR}"
 cp -f "${RESOURCES_DIR}/kernel_fragments/nfs-tftp-boot.config" "${KERNEL_FRAGMENTS_DIR}/"
 cp -f "${RESOURCES_DIR}/kernel_fragments/spi-displays.config" "${KERNEL_FRAGMENTS_DIR}/"
-cp -f "${RESOURCES_DIR}/kernel_fragments/disable-dvb.config" "${KERNEL_FRAGMENTS_DIR}/"
+cp -f "${RESOURCES_DIR}/kernel_fragments/disable-media-ancillary.config" "${KERNEL_FRAGMENTS_DIR}/"
+cp -f "${RESOURCES_DIR}/kernel_fragments/aic8800-firmware-path.config" "${KERNEL_FRAGMENTS_DIR}/"
 cp -f "${RESOURCES_DIR}/kernel_fragments/systemd-compat.config" "${KERNEL_FRAGMENTS_DIR}/"
 
 # Create target and staging directories
@@ -244,6 +332,269 @@ build_and_install() {
     ( eval "${install_cmd}" ) || { echo "Failed to install ${component_name}"; exit 1; }
 }
 
+# --- Kernel (Image + modules + dtbs) ---------------------------------------
+# Built first, and before any of the userspace SDK components below, so that
+# --kernel-only (and --menuconfig) never need anything outside build/,
+# device/ and linux_5.10/ -- the only paths kept by the --kernel-only
+# sparse-checkout set up earlier. Everything from here down to the matching
+# "KERNEL_HEADERS_ROOT=" marker further down touches only those paths.
+
+# Strip pre-existing CONFIG_DVB_* assignments from a .config so that the
+# values from disable-media-ancillary.config (and Kconfig's own defaults, now
+# that CONFIG_MEDIA_SUBDRV_AUTOSELECT is off) apply cleanly.
+# olddefconfig never demotes an *explicit* y/m value on its own, so without
+# this step every DVB frontend/tuner driver would stay built as a module.
+strip_dvb_config() {
+    local config_file=$1
+    sed -i '/^CONFIG_DVB_/d; /^# CONFIG_DVB_.* is not set$/d' "${config_file}"
+}
+
+# Prepare the kernel source tree's arch/arm64/boot/dts/cvitek/ directory:
+# copy the shared dtsi's, generate the memmap header, and produce 3 board
+# .dts variants (no display / ili9488 / sfpd5408) so `make dtbs` builds all
+# of them in one pass -- the display actually used is chosen at deploy time
+# by picking which .dtb is copied to the TFTP server, not at build time.
+prepare_kernel_dts() {
+    local kernel_dts_dir="${KERNEL_PATH}/arch/arm64/boot/dts/cvitek"
+    local kernel_prefixes_dir="${KERNEL_PATH}/scripts/dtc/include-prefixes"
+    local board_dts_dir="${BUILD_PATH}/boards/${CHIP_ARCH,,}/${PROJECT_FULLNAME}/dts_arm64"
+    local board_dts="${board_dts_dir}/${PROJECT_FULLNAME}.dts"
+
+    mkdir -p "${kernel_dts_dir}/displays" "${kernel_prefixes_dir}"
+
+    python3 "${BUILD_PATH}/scripts/mmap_conv.py" --type h \
+        "${BUILD_PATH}/boards/${CHIP_ARCH,,}/${PROJECT_FULLNAME}/memmap.py" \
+        "${kernel_prefixes_dir}/cvi_board_memmap.h" || {
+        echo "Failed to generate cvi_board_memmap.h"
+        exit 1
+    }
+
+    cp -f "${BUILD_PATH}/boards/default/dts/${CHIP_ARCH,,}_arm64/cv181x_base_arm.dtsi" "${kernel_dts_dir}/"
+    cp -f "${BUILD_PATH}/boards/default/dts/${CHIP_ARCH,,}"/*.dtsi "${kernel_dts_dir}/"
+    cp -f "${BUILD_PATH}/boards/default/dts/${CHIP_ARCH,,}_riscv"/*.dtsi "${kernel_dts_dir}/"
+    cp -f "${board_dts_dir}/displays/ili9488.dtsi" "${kernel_dts_dir}/displays/"
+    cp -f "${board_dts_dir}/displays/sfpd5408.dtsi" "${kernel_dts_dir}/displays/"
+
+    # Turn the vendor board .dts into a .dtsi (drop the leading /dts-v1/;)
+    # so it can be #included from 3 sibling .dts entry points.
+    local common_dtsi="${kernel_dts_dir}/${PROJECT_FULLNAME}_common.dtsi"
+    sed '1{/\/dts-v1\/;/d}' "${board_dts}" > "${common_dtsi}"
+
+    cat > "${kernel_dts_dir}/${PROJECT_FULLNAME}.dts" <<EOF
+/dts-v1/;
+#include "${PROJECT_FULLNAME}_common.dtsi"
+EOF
+    cat > "${kernel_dts_dir}/${PROJECT_FULLNAME}_ili9488.dts" <<EOF
+/dts-v1/;
+#include "${PROJECT_FULLNAME}_common.dtsi"
+#include "displays/ili9488.dtsi"
+EOF
+    cat > "${kernel_dts_dir}/${PROJECT_FULLNAME}_sfpd5408.dts" <<EOF
+/dts-v1/;
+#include "${PROJECT_FULLNAME}_common.dtsi"
+#include "displays/sfpd5408.dtsi"
+EOF
+}
+
+# Prepare (or reuse) the kernel .config: vendor defconfig + merged fragments,
+# resolved with olddefconfig. Idempotent -- if a .config from a previous run
+# already exists it is left untouched (so manual menuconfig edits survive
+# across re-runs); only a missing .config or --clean triggers regeneration.
+prepare_kernel_config() {
+    local kernel_output_dir="${KERNEL_PATH}/${KERNEL_OUTPUT_FOLDER}"
+    local kernel_defconfig="${BUILD_PATH}/boards/${CHIP_ARCH,,}/${PROJECT_FULLNAME}/linux/cvitek_${PROJECT_FULLNAME}_defconfig"
+
+    if [[ -f "${kernel_output_dir}/.config" ]]; then
+        echo "Reusing existing kernel .config at ${kernel_output_dir}/.config."
+        return 0
+    fi
+
+    prepare_kernel_dts
+
+    echo "Preparing kernel .config (vendor defconfig + fragments)..."
+    make -C "${KERNEL_PATH}" ARCH=arm64 CROSS_COMPILE="${CROSS_COMPILE}" mrproper || {
+        echo "Failed to clean kernel source tree"
+        exit 1
+    }
+    mkdir -p "${kernel_output_dir}"
+    cp -vf "${kernel_defconfig}" "${kernel_output_dir}/.config"
+
+    make -C "${KERNEL_PATH}" O="${kernel_output_dir}" ARCH=arm64 CROSS_COMPILE="${CROSS_COMPILE}" olddefconfig || {
+        echo "Failed to prepare kernel config"
+        exit 1
+    }
+
+    # Merge all fragments: NFS/TFTP + SPI displays + systemd cgroups compat
+    # + AIC8800 firmware path, onto the vendor defconfig. The multimedia
+    # ancillary drivers are dropped too unless --with-dvb was passed.
+    local fragments=(
+        "${KERNEL_FRAGMENTS_DIR}/nfs-tftp-boot.config"
+        "${KERNEL_FRAGMENTS_DIR}/spi-displays.config"
+        "${KERNEL_FRAGMENTS_DIR}/systemd-compat.config"
+        "${KERNEL_FRAGMENTS_DIR}/aic8800-firmware-path.config"
+    )
+    if [[ "${WITH_DVB}" -ne 1 ]]; then
+        strip_dvb_config "${kernel_output_dir}/.config"
+        fragments+=("${KERNEL_FRAGMENTS_DIR}/disable-media-ancillary.config")
+    fi
+    "${KERNEL_PATH}/scripts/kconfig/merge_config.sh" -m -O "${kernel_output_dir}" \
+        "${kernel_output_dir}/.config" "${fragments[@]}" || {
+        echo "Failed to merge kernel config fragments"
+        exit 1
+    }
+
+    make -C "${KERNEL_PATH}" O="${kernel_output_dir}" ARCH=arm64 CROSS_COMPILE="${CROSS_COMPILE}" olddefconfig || {
+        echo "Failed to resolve merged kernel config"
+        exit 1
+    }
+}
+
+# --menuconfig: make sure kernel source (cloned as part of the SDK), the
+# cross-compile toolchain (host-tools, already ensured above) and a merged
+# .config all exist, then open an interactive menuconfig on top of it and
+# exit. The resulting .config is picked up as-is (untouched) by the next
+# non-menuconfig run, since prepare_kernel_config() only (re)generates the
+# config when one doesn't already exist.
+run_menuconfig() {
+    local kernel_output_dir="${KERNEL_PATH}/${KERNEL_OUTPUT_FOLDER}"
+
+    prepare_kernel_config
+
+    echo "Opening menuconfig on ${kernel_output_dir}/.config ..."
+    make -C "${KERNEL_PATH}" O="${kernel_output_dir}" ARCH=arm64 CROSS_COMPILE="${CROSS_COMPILE}" menuconfig || {
+        echo "menuconfig failed or was aborted"
+        exit 1
+    }
+
+    echo ""
+    echo "Kernel .config updated at ${kernel_output_dir}/.config."
+    echo "Recommended command to compile/install only the kernel Image, modules and dtbs with this saved .config:"
+    local kernel_only_cmd=(
+        "$0"
+        "--kernel-only"
+        "--workdir" "${WORKDIR}"
+        "--sdk-repo" "${SDK_REPO_URL}"
+        "--sdk-ref" "${SDK_REF}"
+        "--board" "${BOARD}"
+        "--target-rootfs" "${TARGET_ROOTFS}"
+    )
+    if [[ "${WITH_DVB}" -eq 1 ]]; then
+        kernel_only_cmd+=("--with-dvb")
+    fi
+    printf "  "
+    printf "%q " "${kernel_only_cmd[@]}"
+    echo ""
+    echo "Do not add --mrproper for that run, otherwise the saved .config will be removed."
+    echo ""
+    echo "Equivalent kernel make commands used by the script:"
+    printf "  make -j\"\$(nproc)\" -C %q O=%q ARCH=arm64 CROSS_COMPILE=%q Image modules dtbs\n" \
+        "${KERNEL_PATH}" "${kernel_output_dir}" "${CROSS_COMPILE}"
+    printf "  make -j\"\$(nproc)\" -C %q O=%q ARCH=arm64 CROSS_COMPILE=%q INSTALL_MOD_PATH=%q INSTALL_HDR_PATH=%q modules_install headers_install\n" \
+        "${KERNEL_PATH}" "${kernel_output_dir}" "${CROSS_COMPILE}" \
+        "${kernel_output_dir}/modules" "${kernel_output_dir}/arm64/usr"
+    echo "The script also copies Image and the generated dtbs to ${TFTP_DEPLOY_DIR}."
+}
+
+# The AIC8800 Wi-Fi/Bluetooth firmware blobs ship inside the SDK's rootfs
+# overlay (an Android-style /mnt/system layout). On a Debian FHS rootfs the
+# kernel firmware loader looks under /lib/firmware, so deploy the aic8800/
+# directory there.
+install_aic8800_firmware() {
+    local target_root=$1
+    local fw_src="${TOP_DIR}/device/generic/rootfs_overlay/duos/mnt/system/firmware/aic8800"
+    local fw_dest="${target_root}/lib/firmware"
+
+    if [[ ! -d "${fw_src}" ]]; then
+        echo "AIC8800 firmware not found at ${fw_src}, skipping."
+        return 0
+    fi
+
+    echo "Installing AIC8800 Wi-Fi/Bluetooth firmware to /lib/firmware/aic8800..."
+    mkdir -p "${fw_dest}/aic8800"
+    cp -a "${fw_src}/." "${fw_dest}/aic8800/" || {
+        echo "Failed to install AIC8800 firmware"
+        exit 1
+    }
+}
+
+build_kernel_standalone() {
+    local kernel_output_dir="${KERNEL_PATH}/${KERNEL_OUTPUT_FOLDER}"
+
+    if [[ "${CLEAN_BUILD}" -eq 1 ]]; then
+        echo "Removing previous kernel output (--clean): ${kernel_output_dir}"
+        rm -rf "${kernel_output_dir}"
+    fi
+
+    # Skip if already built (Module.symvers is the reliable completion marker).
+    # Since this is the *only* kernel build in the whole pipeline (dtbs and
+    # kernel modules for target_rootfs both come from here), whatever kernel
+    # this produces is always what modules get built against -- no more
+    # separate kernel builds to keep in sync by hand.
+    if [[ -f "${kernel_output_dir}/Module.symvers" ]]; then
+        echo "Kernel already built, skipping."
+        return 0
+    fi
+
+    prepare_kernel_config
+
+    echo "Building standalone kernel output..."
+    make -j"$(nproc)" -C "${KERNEL_PATH}" O="${kernel_output_dir}" ARCH=arm64 CROSS_COMPILE="${CROSS_COMPILE}" Image modules dtbs || {
+        echo "Failed to build kernel image/modules/dtbs"
+        exit 1
+    }
+
+    make -j"$(nproc)" -C "${KERNEL_PATH}" O="${kernel_output_dir}" ARCH=arm64 CROSS_COMPILE="${CROSS_COMPILE}" \
+        INSTALL_MOD_PATH="${kernel_output_dir}/modules" \
+        INSTALL_HDR_PATH="${kernel_output_dir}/arm64/usr" \
+        modules_install headers_install || {
+        echo "Failed to install kernel modules/headers"
+        exit 1
+    }
+
+    mkdir -p "${kernel_output_dir}/usr"
+    ln -snf "${kernel_output_dir}/arm64/usr/include" "${kernel_output_dir}/usr/include"
+
+    # Stage the AIC8800 firmware alongside the installed modules so that the
+    # modules/ tree produced here (which --kernel-only points the user at) is
+    # directly deployable: modules/lib/modules/... + modules/lib/firmware/aic8800.
+    install_aic8800_firmware "${kernel_output_dir}/modules"
+
+    # Deposit the Image + all 3 dtb variants where they're ready to be
+    # copied to a TFTP server.
+    mkdir -p "${TFTP_DEPLOY_DIR}"
+    cp -f "${kernel_output_dir}/arch/arm64/boot/Image" "${TFTP_DEPLOY_DIR}/"
+    cp -f "${kernel_output_dir}/arch/arm64/boot/dts/cvitek/${PROJECT_FULLNAME}.dtb" \
+        "${TFTP_DEPLOY_DIR}/${PROJECT_FULLNAME}.dtb"
+    cp -f "${kernel_output_dir}/arch/arm64/boot/dts/cvitek/${PROJECT_FULLNAME}_ili9488.dtb" \
+        "${TFTP_DEPLOY_DIR}/${PROJECT_FULLNAME}_ili9488.dtb"
+    cp -f "${kernel_output_dir}/arch/arm64/boot/dts/cvitek/${PROJECT_FULLNAME}_sfpd5408.dtb" \
+        "${TFTP_DEPLOY_DIR}/${PROJECT_FULLNAME}_sfpd5408.dtb"
+}
+
+# --menuconfig short-circuits everything else: ensure prerequisites, edit the
+# config interactively, then exit without building anything. Only touches
+# build/, device/ and linux_5.10/ -- safe under the --kernel-only sparse
+# checkout even without --kernel-only itself.
+if [[ "${MENUCONFIG}" -eq 1 ]]; then
+    run_menuconfig
+    exit 0
+fi
+
+build_kernel_standalone
+
+# --kernel-only: stop right after Image/modules/dtbs, skip the rest of the SDK
+# (userspace libs, TPU SDK, rootfs, etc.) -- and, crucially, skip ever
+# touching paths outside build/, device/ and linux_5.10/, which is what the
+# --kernel-only sparse checkout above assumes.
+if [[ "${KERNEL_ONLY}" -eq 1 ]]; then
+    echo ""
+    echo "--kernel-only: kernel Image, modules and dtbs built. Skipping the rest of the SDK build."
+    echo "Deployed artefacts: ${TFTP_DEPLOY_DIR}"
+    echo "Kernel modules:     ${KERNEL_PATH}/${KERNEL_OUTPUT_FOLDER}/modules"
+    echo "AIC8800 firmware:   ${KERNEL_PATH}/${KERNEL_OUTPUT_FOLDER}/modules/lib/firmware/aic8800"
+    exit 0
+fi
+
 sync_sophgo_tdl_models() {
     if [[ "${SKIP_SOPHGO_TDL_MODELS}" == "1" ]]; then
         echo "Skipping Sophgo tdl_models sync (SKIP_SOPHGO_TDL_MODELS=1)"
@@ -326,150 +677,6 @@ build_and_install "cvi_mpi" \
 mkdir -p "${STAGING_DIR}/include"
 cp -rav cvi_mpi/include/* "${STAGING_DIR}/include/"
 
-# Strip pre-existing CONFIG_DVB_* assignments from a .config so that, once
-# CONFIG_MEDIA_SUBDRV_AUTOSELECT=y is merged in, Kconfig recomputes their
-# defaults from scratch (see resources/kernel_fragments/disable-dvb.config).
-# olddefconfig never demotes an *explicit* y/m value on its own, so simply
-# merging the AUTOSELECT fragment without this step would keep every DVB
-# frontend/tuner driver built as a module.
-strip_dvb_config() {
-    local config_file=$1
-    sed -i '/^CONFIG_DVB_/d; /^# CONFIG_DVB_.* is not set$/d' "${config_file}"
-}
-
-# Prepare the kernel source tree's arch/arm64/boot/dts/cvitek/ directory:
-# copy the shared dtsi's, generate the memmap header, and produce 3 board
-# .dts variants (no display / ili9488 / sfpd5408) so `make dtbs` builds all
-# of them in one pass -- the display actually used is chosen at deploy time
-# by picking which .dtb is copied to the TFTP server, not at build time.
-prepare_kernel_dts() {
-    local kernel_dts_dir="${KERNEL_PATH}/arch/arm64/boot/dts/cvitek"
-    local kernel_prefixes_dir="${KERNEL_PATH}/scripts/dtc/include-prefixes"
-    local board_dts_dir="${BUILD_PATH}/boards/${CHIP_ARCH,,}/${PROJECT_FULLNAME}/dts_arm64"
-    local board_dts="${board_dts_dir}/${PROJECT_FULLNAME}.dts"
-
-    mkdir -p "${kernel_dts_dir}/displays" "${kernel_prefixes_dir}"
-
-    python3 "${BUILD_PATH}/scripts/mmap_conv.py" --type h \
-        "${BUILD_PATH}/boards/${CHIP_ARCH,,}/${PROJECT_FULLNAME}/memmap.py" \
-        "${kernel_prefixes_dir}/cvi_board_memmap.h" || {
-        echo "Failed to generate cvi_board_memmap.h"
-        exit 1
-    }
-
-    cp -f "${BUILD_PATH}/boards/default/dts/${CHIP_ARCH,,}_arm64/cv181x_base_arm.dtsi" "${kernel_dts_dir}/"
-    cp -f "${BUILD_PATH}/boards/default/dts/${CHIP_ARCH,,}"/*.dtsi "${kernel_dts_dir}/"
-    cp -f "${BUILD_PATH}/boards/default/dts/${CHIP_ARCH,,}_riscv"/*.dtsi "${kernel_dts_dir}/"
-    cp -f "${board_dts_dir}/displays/ili9488.dtsi" "${kernel_dts_dir}/displays/"
-    cp -f "${board_dts_dir}/displays/sfpd5408.dtsi" "${kernel_dts_dir}/displays/"
-
-    # Turn the vendor board .dts into a .dtsi (drop the leading /dts-v1/;)
-    # so it can be #included from 3 sibling .dts entry points.
-    local common_dtsi="${kernel_dts_dir}/${PROJECT_FULLNAME}_common.dtsi"
-    sed '1{/\/dts-v1\/;/d}' "${board_dts}" > "${common_dtsi}"
-
-    cat > "${kernel_dts_dir}/${PROJECT_FULLNAME}.dts" <<EOF
-/dts-v1/;
-#include "${PROJECT_FULLNAME}_common.dtsi"
-EOF
-    cat > "${kernel_dts_dir}/${PROJECT_FULLNAME}_ili9488.dts" <<EOF
-/dts-v1/;
-#include "${PROJECT_FULLNAME}_common.dtsi"
-#include "displays/ili9488.dtsi"
-EOF
-    cat > "${kernel_dts_dir}/${PROJECT_FULLNAME}_sfpd5408.dts" <<EOF
-/dts-v1/;
-#include "${PROJECT_FULLNAME}_common.dtsi"
-#include "displays/sfpd5408.dtsi"
-EOF
-}
-
-build_kernel_standalone() {
-    local kernel_output_dir="${KERNEL_PATH}/${KERNEL_OUTPUT_FOLDER}"
-    local kernel_defconfig="${BUILD_PATH}/boards/${CHIP_ARCH,,}/${PROJECT_FULLNAME}/linux/cvitek_${PROJECT_FULLNAME}_defconfig"
-
-    if [[ "${CLEAN_BUILD}" -eq 1 ]]; then
-        echo "Removing previous kernel output (--clean): ${kernel_output_dir}"
-        rm -rf "${kernel_output_dir}"
-    fi
-
-    # Skip if already built (Module.symvers is the reliable completion marker).
-    # Since this is the *only* kernel build in the whole pipeline (dtbs and
-    # kernel modules for target_rootfs both come from here), whatever kernel
-    # this produces is always what modules get built against -- no more
-    # separate kernel builds to keep in sync by hand.
-    if [[ -f "${kernel_output_dir}/Module.symvers" ]]; then
-        echo "Kernel already built, skipping."
-        return 0
-    fi
-
-    prepare_kernel_dts
-
-    echo "Building standalone kernel output..."
-    make -C "${KERNEL_PATH}" ARCH=arm64 CROSS_COMPILE="${CROSS_COMPILE}" mrproper || {
-        echo "Failed to clean kernel source tree"
-        exit 1
-    }
-    mkdir -p "${kernel_output_dir}"
-    cp -vf "${kernel_defconfig}" "${kernel_output_dir}/.config"
-
-    make -C "${KERNEL_PATH}" O="${kernel_output_dir}" ARCH=arm64 CROSS_COMPILE="${CROSS_COMPILE}" olddefconfig || {
-        echo "Failed to prepare kernel config"
-        exit 1
-    }
-
-    # Merge all fragments: NFS/TFTP + SPI displays + systemd cgroups compat
-    # + optional DVB-disable, onto the vendor defconfig.
-    local fragments=(
-        "${KERNEL_FRAGMENTS_DIR}/nfs-tftp-boot.config"
-        "${KERNEL_FRAGMENTS_DIR}/spi-displays.config"
-        "${KERNEL_FRAGMENTS_DIR}/systemd-compat.config"
-    )
-    if [[ "${WITH_DVB}" -ne 1 ]]; then
-        strip_dvb_config "${kernel_output_dir}/.config"
-        fragments+=("${KERNEL_FRAGMENTS_DIR}/disable-dvb.config")
-    fi
-    "${KERNEL_PATH}/scripts/kconfig/merge_config.sh" -m -O "${kernel_output_dir}" \
-        "${kernel_output_dir}/.config" "${fragments[@]}" || {
-        echo "Failed to merge kernel config fragments"
-        exit 1
-    }
-
-    make -C "${KERNEL_PATH}" O="${kernel_output_dir}" ARCH=arm64 CROSS_COMPILE="${CROSS_COMPILE}" olddefconfig || {
-        echo "Failed to resolve merged kernel config"
-        exit 1
-    }
-
-    make -j"$(nproc)" -C "${KERNEL_PATH}" O="${kernel_output_dir}" ARCH=arm64 CROSS_COMPILE="${CROSS_COMPILE}" Image modules dtbs || {
-        echo "Failed to build kernel image/modules/dtbs"
-        exit 1
-    }
-
-    make -j"$(nproc)" -C "${KERNEL_PATH}" O="${kernel_output_dir}" ARCH=arm64 CROSS_COMPILE="${CROSS_COMPILE}" \
-        INSTALL_MOD_PATH="${kernel_output_dir}/modules" \
-        INSTALL_HDR_PATH="${kernel_output_dir}/arm64/usr" \
-        modules_install headers_install || {
-        echo "Failed to install kernel modules/headers"
-        exit 1
-    }
-
-    mkdir -p "${kernel_output_dir}/usr"
-    ln -snf "${kernel_output_dir}/arm64/usr/include" "${kernel_output_dir}/usr/include"
-
-    # Deposit the Image + all 3 dtb variants where they're ready to be
-    # copied to a TFTP server.
-    mkdir -p "${TFTP_DEPLOY_DIR}"
-    cp -f "${kernel_output_dir}/arch/arm64/boot/Image" "${TFTP_DEPLOY_DIR}/"
-    cp -f "${kernel_output_dir}/arch/arm64/boot/dts/cvitek/${PROJECT_FULLNAME}.dtb" \
-        "${TFTP_DEPLOY_DIR}/${PROJECT_FULLNAME}.dtb"
-    cp -f "${kernel_output_dir}/arch/arm64/boot/dts/cvitek/${PROJECT_FULLNAME}_ili9488.dtb" \
-        "${TFTP_DEPLOY_DIR}/${PROJECT_FULLNAME}_ili9488.dtb"
-    cp -f "${kernel_output_dir}/arch/arm64/boot/dts/cvitek/${PROJECT_FULLNAME}_sfpd5408.dtb" \
-        "${TFTP_DEPLOY_DIR}/${PROJECT_FULLNAME}_sfpd5408.dtb"
-}
-
-build_kernel_standalone
-
 KERNEL_HEADERS_ROOT="${KERNEL_PATH}/${KERNEL_OUTPUT_FOLDER}/arm64/usr"
 
 # --- 9. Ive ---
@@ -551,6 +758,9 @@ KO_DEST="${TARGET_ROOTFS}/lib/modules/${KERNEL_VER}/extra/cvitek"
 mkdir -p "${KO_DEST}/3rd"
 find "${STAGING_DIR}/ko/" -maxdepth 1 -name '*.ko' -exec cp -f {} "${KO_DEST}/" \;
 find "${STAGING_DIR}/ko/3rd/" -name '*.ko' -exec cp -f {} "${KO_DEST}/3rd/" \; 2>/dev/null || true
+
+# AIC8800 Wi-Fi/Bluetooth firmware → /lib/firmware/aic8800/
+install_aic8800_firmware "${TARGET_ROOTFS}"
 
 # modules-load.d: load CVI kernel modules at boot via systemd-modules-load
 MODULES_LOAD_DIR="${TARGET_ROOTFS}/etc/modules-load.d"
@@ -1080,6 +1290,8 @@ See \`/usr/include/rtos_cmdqu.h\` for all IP types (\`IP_ISP\`, \`IP_VCODEC\`,
 ## Troubleshooting
 
 - **Modules not loading:** run \`depmod -a\` then \`systemctl restart systemd-modules-load\`
+- **Wi-Fi/Bluetooth (AIC8800) not working:** the firmware must be present in
+  \`/lib/firmware/aic8800/\` — check \`dmesg | grep -i aic\`
 - **Library not found:** run \`ldconfig\` and check \`ldconfig -p | grep cvi\`
 - **USB not working:** check \`dmesg | grep dwc2\` — the controller must show \`dual-role\`
 - **Camera not detected:** verify the CSI cable and check \`dmesg | grep ov5647\`
@@ -1092,6 +1304,7 @@ echo "Build and installation complete!"
 echo ""
 echo "Kernel version: ${KERNEL_VER}"
 echo "Modules installed in: ${TARGET_ROOTFS}/lib/modules/${KERNEL_VER}/extra/cvitek/"
+echo "AIC8800 firmware installed in: ${TARGET_ROOTFS}/lib/firmware/aic8800/"
 echo "Libraries installed in: ${TARGET_ROOTFS}/usr/lib/"
 echo "README: ${TARGET_ROOTFS}/usr/share/cvitek/README.md"
 if [[ "${SKIP_SOPHGO_TDL_MODELS}" != "1" ]]; then
