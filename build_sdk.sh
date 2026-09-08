@@ -927,6 +927,37 @@ ln -sf /etc/cvitek/param/cvi_sdr_bin_OV5647.bin "${TARGET_ROOTFS}/etc/cvitek/par
 #cp -f device/generic/rootfs_overlay/common/mnt/cfg/param/cvi_sdr_bin_OV5647.bin \
 #    "${TARGET_ROOTFS}/etc/cvitek/param/" 2>/dev/null || true
 
+# Camera test script generation
+cat << 'EOF' > "${TARGET_ROOTFS}/usr/bin/camera-test.sh"
+#!/bin/sh
+# Script de test caméra avec détection faciale pour Debian Trixie
+
+MODEL_PATH="/usr/share/cvitek/models/scrfd_768_432_int8_1x.cvimodel"
+
+echo "=== Test caméra et TPU (Face Detection) ==="
+
+if [ ! -f /etc/cvitek/sensor_cfg.ini ]; then
+    echo "[ERREUR] Fichier /etc/cvitek/sensor_cfg.ini introuvable !"
+    exit 1
+fi
+
+if [ -f "$MODEL_PATH" ] && [ -x /usr/bin/sample_vi_fd ]; then
+    echo "Lancement de sample_vi_fd avec le modèle $MODEL_PATH..."
+    exec /usr/bin/sample_vi_fd "$MODEL_PATH"
+elif [ -x /usr/bin/sample_venc ]; then
+    echo "[INFO] Modèle IA introuvable ou sample_vi_fd manquant. Lancement de sample_venc..."
+    exec /usr/bin/sample_venc 0
+elif [ -x /usr/bin/sample_vio ]; then
+    echo "[INFO] Lancement de sample_vio..."
+    exec /usr/bin/sample_vio 0
+else
+    echo "[ERREUR] Aucun binaire de test exécutable trouvé dans /usr/bin."
+    exit 1
+fi
+EOF
+
+chmod +x "${TARGET_ROOTFS}/usr/bin/camera-test.sh"
+
 # USB gadget scripts (RNDIS, NCM, host mode) – USB stack is built-in, no insmod needed
 USB_SCRIPT_DIR="${TARGET_ROOTFS}/usr/share/cvitek/usb"
 mkdir -p "${USB_SCRIPT_DIR}"
@@ -1017,7 +1048,7 @@ ISP tuning binary: \`/etc/cvitek/param/cvi_sdr_bin_OV5647.bin\`
 ### Quick camera test
 \`\`\`bash
 # Set the sensor config (adjust path for J1 or J2)
-export SENSOR_CFG=/etc/cvitek/sensor/sensor_cfg_OV5647_J1.ini
+export SENSOR_CFG=/etc/cvitek/sensor/sensor_cfg_OV5647_J2.ini
 /usr/bin/sample_vio
 \`\`\`
 
