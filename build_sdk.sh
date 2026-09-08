@@ -905,16 +905,27 @@ chmod 755 "${TARGET_ROOTFS}/usr/bin/cvitek-samples-env"
 mkdir -p "${TARGET_ROOTFS}/etc/cvitek"
 [[ -d "${STAGING_DIR}/etc/cvitek" ]] && cp -a "${STAGING_DIR}/etc/cvitek/." "${TARGET_ROOTFS}/etc/cvitek/"
 
-# OV5647 sensor config (two CSI connectors J1 and J2 on Duo S)
+# Sensors configs (two CSI connectors J1 and J2 on Duo S)
 mkdir -p "${TARGET_ROOTFS}/etc/cvitek/sensor"
-cp -f device/generic/rootfs_overlay/duos/mnt/data/sensor_cfg_OV5647_J1.ini \
-    "${TARGET_ROOTFS}/etc/cvitek/sensor/" 2>/dev/null || true
-cp -f device/generic/rootfs_overlay/duos/mnt/data/sensor_cfg_OV5647_J2.ini \
-    "${TARGET_ROOTFS}/etc/cvitek/sensor/" 2>/dev/null || true
-# ISP tuning bin for OV5647
+if [ -d "device/generic/rootfs_overlay/duos/mnt/data" ]; then
+    cp -v device/generic/rootfs_overlay/duos/mnt/data/*.ini "${TARGET_ROOTFS}/etc/cvitek/sensor/" 2>/dev/null || true
+fi
+ln -sf /etc/cvitek/sensor_ov5647_J2.ini "${TARGET_ROOTFS}/etc/cvitek/sensor_cfg.ini"
+
+# ISP tuning bin for sensors
 mkdir -p "${TARGET_ROOTFS}/etc/cvitek/param"
-cp -f device/generic/rootfs_overlay/common/mnt/cfg/param/cvi_sdr_bin_OV5647.bin \
+cp -f device/generic/rootfs_overlay/common/mnt/cfg/param/* \
     "${TARGET_ROOTFS}/etc/cvitek/param/" 2>/dev/null || true
+ln -sf /etc/cvitek/param/cvi_sdr_bin_OV5647.bin "${TARGET_ROOTFS}/etc/cvitek/param/cvi_sdr_bin"
+    
+#cp -f device/generic/rootfs_overlay/duos/mnt/data/sensor_cfg_OV5647_J1.ini \
+#    "${TARGET_ROOTFS}/etc/cvitek/sensor/" 2>/dev/null || true
+#cp -f device/generic/rootfs_overlay/duos/mnt/data/sensor_cfg_OV5647_J2.ini \
+#    "${TARGET_ROOTFS}/etc/cvitek/sensor/" 2>/dev/null || true
+# ISP tuning bin for OV5647
+#mkdir -p "${TARGET_ROOTFS}/etc/cvitek/param"
+#cp -f device/generic/rootfs_overlay/common/mnt/cfg/param/cvi_sdr_bin_OV5647.bin \
+#    "${TARGET_ROOTFS}/etc/cvitek/param/" 2>/dev/null || true
 
 # USB gadget scripts (RNDIS, NCM, host mode) – USB stack is built-in, no insmod needed
 USB_SCRIPT_DIR="${TARGET_ROOTFS}/usr/share/cvitek/usb"
