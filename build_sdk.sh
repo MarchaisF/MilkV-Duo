@@ -910,7 +910,7 @@ mkdir -p "${TARGET_ROOTFS}/etc/cvitek/sensor"
 if [ -d "device/generic/rootfs_overlay/duos/mnt/data" ]; then
     cp -v device/generic/rootfs_overlay/duos/mnt/data/*.ini "${TARGET_ROOTFS}/etc/cvitek/sensor/" 2>/dev/null || true
 fi
-ln -sf /etc/cvitek/sensor_ov5647_J2.ini "${TARGET_ROOTFS}/etc/cvitek/sensor_cfg.ini"
+ln -sf /etc/cvitek/sensor_cfg_OV5647_J2.ini "${TARGET_ROOTFS}/etc/cvitek/sensor_cfg.ini"
 
 # ISP tuning bin for sensors
 mkdir -p "${TARGET_ROOTFS}/etc/cvitek/param"
