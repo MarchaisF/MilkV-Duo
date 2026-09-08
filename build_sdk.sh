@@ -958,6 +958,24 @@ EOF
 
 chmod +x "${TARGET_ROOTFS}/usr/bin/camera-test.sh"
 
+#######################################
+# Duo-pinux (Pin Multiplexing Utility)
+#######################################
+echo "Cloning duo-pinmux repo..."
+if [ ! -d "duo-pinmux" ]; then
+	git clone https://github.com/milkv-duo/duo-pinmux.git
+fi
+make -C duo-pinmux/duos CC="${CROSS_COMPILE}gcc" clean
+make -C duo-pinmux/duos CC="${CROSS_COMPILE}gcc" CFLAGS='-mcpu=cortex-a53 -march=armv8-a -mabi=lp64 -static -O2' -j$(nproc)
+
+mkdir -p "${TARGET_ROOTFS}/usr/bin"
+if [ -f "duo-pinmux/duos/duo-pinmux" ]; then
+	cp -v duo-pinmux/duos/duo-pinmux "${TARGET_ROOTFS}/usr/bin"
+elif [ -f "duo-pinmux/duos/pinmux" ]; then
+	cp -v duo-pinmux/duos/pinmux "${TARGET_ROOTFS}/usr/bin/duo-pinmux"
+fi
+ln -sf duo-pinmux "${TARGET_ROOTFS}/usr/bin/pinmux"
+
 # USB gadget scripts (RNDIS, NCM, host mode) – USB stack is built-in, no insmod needed
 USB_SCRIPT_DIR="${TARGET_ROOTFS}/usr/share/cvitek/usb"
 mkdir -p "${USB_SCRIPT_DIR}"
