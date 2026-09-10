@@ -517,6 +517,23 @@ install_aic8800_firmware() {
     }
 }
 
+install_vcodec_firmware() {
+    local fw_src="${TOP_DIR}/device/generic/rootfs_overlay/common/usr/share/fw_vcodec"
+    local fw_dest="${TARGET_ROOTFS}/usr/share/fw_vcodec"
+
+    if [[ ! -f "${fw_src}/coda980.bin" ]]; then
+        echo "Required VENC firmware is missing: ${fw_src}/coda980.bin"
+        exit 1
+    fi
+
+    echo "Installing VENC firmware to /usr/share/fw_vcodec..."
+    mkdir -p "${fw_dest}"
+    cp -a "${fw_src}/." "${fw_dest}/" || {
+        echo "Failed to install VENC firmware"
+        exit 1
+    }
+}
+
 build_kernel_standalone() {
     local kernel_output_dir="${KERNEL_PATH}/${KERNEL_OUTPUT_FOLDER}"
 
@@ -700,8 +717,8 @@ echo "Installing prebuilt Live555..."
 mkdir -p cvi_rtsp/prebuilt
 tar -xf oss/oss_release_tarball/64bit/live555.tar.gz -C cvi_rtsp/prebuilt/
 build_and_install "cvi_rtsp" \
-    "cd cvi_rtsp && SDK_VER=64bit CROSS_COMPILE=aarch64-linux-gnu- MW_DIR=${TOP_DIR}/cvi_mpi LIVE555_DIR=${TOP_DIR}/cvi_rtsp/prebuilt ./build.sh" \
-    "cd cvi_rtsp && make install DESTDIR=${STAGING_DIR}"
+    "cd cvi_rtsp && SDK_VER=64bit CROSS_COMPILE=aarch64-linux-gnu- MW_DIR=${TOP_DIR}/cvi_mpi LIVE555_DIR=${TOP_DIR}/cvi_rtsp/prebuilt BUILD_SERVICE=1 ./build.sh" \
+    "cd cvi_rtsp && BUILD_SERVICE=1 make install DESTDIR=${STAGING_DIR}"
 
 # --- 12. Tdl_sdk ---
 rm -rf cvi_rtsp/install
@@ -726,41 +743,65 @@ echo "Copying ISP tuning configurations..."
 mkdir -p "${STAGING_DIR}/etc/cvitek"
 cp -rf isp_tuning/cv181x/src/* "${STAGING_DIR}/etc/cvitek/"
 
-# --- Final Step: Install into target_rootfs using FHS layout for Debian ---
+# --- Final Step: Install into target_rootfs ---------------------------------
+# The vendor middleware is not relocatable: its binaries, scripts and ISP
+# configuration refer to /mnt/system, /mnt/data and /mnt/cfg directly. Install
+# it in FHS locations and create those legacy paths only as compatibility links.
 KERNEL_VER=$(ls "${KERNEL_PATH}/${KERNEL_OUTPUT_FOLDER}/modules/lib/modules/")
-echo "Installing artifacts to ${TARGET_ROOTFS} (FHS layout, kernel ${KERNEL_VER})..."
+CVITEK_MNT_DIR="${TARGET_ROOTFS}/mnt"
+CVITEK_SYSTEM_DIR="${TARGET_ROOTFS}/usr/lib/cvitek"
+CVITEK_DATA_DIR="${TARGET_ROOTFS}/etc/cvitek/sensor"
+CVITEK_CFG_DIR="${TARGET_ROOTFS}/etc/cvitek"
+echo "Installing artifacts to ${TARGET_ROOTFS} (Cvitek FHS layout, kernel ${KERNEL_VER})..."
 
-# Shared libraries → /usr/lib/
-mkdir -p "${TARGET_ROOTFS}/usr/lib"
-find "${STAGING_DIR}/lib/" -maxdepth 1 -name '*.so*' -exec cp -a {} "${TARGET_ROOTFS}/usr/lib/" \;
-find "${STAGING_DIR}/usr/lib/" -maxdepth 1 -name '*.so*' -exec cp -a {} "${TARGET_ROOTFS}/usr/lib/" \; 2>/dev/null || true
-# ive installs its TPU extension lib under ex_lib/, not lib/ or usr/lib/ — don't miss it.
-find "${STAGING_DIR}/ex_lib/" -maxdepth 1 -name '*.so*' -exec cp -a {} "${TARGET_ROOTFS}/usr/lib/" \; 2>/dev/null || true
-if [[ -d "${STAGING_DIR}/usr/lib/3rd" ]]; then
-    mkdir -p "${TARGET_ROOTFS}/usr/lib/cvitek/3rd"
-    find "${STAGING_DIR}/usr/lib/3rd/" -name '*.so*' -exec cp -a {} "${TARGET_ROOTFS}/usr/lib/cvitek/3rd/" \;
+# Preserve the vendor's lib/, usr/, ko/ and auxiliary directory relationships
+# under a private Debian prefix rather than polluting the global /usr/lib ABI.
+mkdir -p "${CVITEK_SYSTEM_DIR}"
+cp -a device/generic/rootfs_overlay/common/mnt/system/. "${CVITEK_SYSTEM_DIR}/"
+cp -a device/generic/rootfs_overlay/duos/mnt/system/. "${CVITEK_SYSTEM_DIR}/"
+cp -a "${STAGING_DIR}/." "${CVITEK_SYSTEM_DIR}/"
+
+# ive installs its TPU extension libraries under ex_lib/ rather than lib/.
+if [[ -d "${CVITEK_SYSTEM_DIR}/ex_lib" ]]; then
+    mkdir -p "${CVITEK_SYSTEM_DIR}/lib"
+    find "${CVITEK_SYSTEM_DIR}/ex_lib/" -maxdepth 1 -name '*.so*' -exec cp -a {} "${CVITEK_SYSTEM_DIR}/lib/" \;
 fi
-if [[ -d "${STAGING_DIR}/sample/3rd" ]]; then
-    mkdir -p "${TARGET_ROOTFS}/usr/lib/cvitek/3rd"
-    find "${STAGING_DIR}/sample/3rd/" -path '*/lib/*.so*' -exec cp -a {} "${TARGET_ROOTFS}/usr/lib/cvitek/3rd/" \;
+if [[ -d "${CVITEK_SYSTEM_DIR}/sample/3rd" ]]; then
+    mkdir -p "${CVITEK_SYSTEM_DIR}/usr/lib/3rd"
+    find "${CVITEK_SYSTEM_DIR}/sample/3rd/" -path '*/lib/*.so*' -exec cp -a {} "${CVITEK_SYSTEM_DIR}/usr/lib/3rd/" \;
 fi
 
-# ldconfig config so the dynamic linker finds all cvitek libs
+# Let normal Debian-launched binaries resolve the private Cvitek ABI. Do not
+# duplicate these libraries into /usr/lib, which permits incompatible mixtures
+# of middleware builds to be loaded.
 mkdir -p "${TARGET_ROOTFS}/etc/ld.so.conf.d"
 cat > "${TARGET_ROOTFS}/etc/ld.so.conf.d/cvitek.conf" << 'EOF'
 # Cvitek SG2000 / CV181X SDK libraries
-/usr/lib
-/usr/lib/cvitek/3rd
+/usr/lib/cvitek/lib
+/usr/lib/cvitek/usr/lib
+/usr/lib/cvitek/usr/lib/3rd
 EOF
 
 # Kernel modules → /lib/modules/<version>/extra/cvitek/
+KERNEL_MODULES_SRC="${KERNEL_PATH}/${KERNEL_OUTPUT_FOLDER}/modules/lib/modules/${KERNEL_VER}"
+if [[ ! -d "${KERNEL_MODULES_SRC}" ]]; then
+    echo "Installed kernel modules are missing: ${KERNEL_MODULES_SRC}"
+    exit 1
+fi
+mkdir -p "${TARGET_ROOTFS}/lib/modules"
+cp -a "${KERNEL_MODULES_SRC}" "${TARGET_ROOTFS}/lib/modules/"
 KO_DEST="${TARGET_ROOTFS}/lib/modules/${KERNEL_VER}/extra/cvitek"
 mkdir -p "${KO_DEST}/3rd"
 find "${STAGING_DIR}/ko/" -maxdepth 1 -name '*.ko' -exec cp -f {} "${KO_DEST}/" \;
 find "${STAGING_DIR}/ko/3rd/" -name '*.ko' -exec cp -f {} "${KO_DEST}/3rd/" \; 2>/dev/null || true
+depmod -b "${TARGET_ROOTFS}" "${KERNEL_VER}" || {
+    echo "Failed to generate module dependency metadata for ${KERNEL_VER}"
+    exit 1
+}
 
 # AIC8800 Wi-Fi/Bluetooth firmware → /lib/firmware/aic8800/
 install_aic8800_firmware "${TARGET_ROOTFS}"
+install_vcodec_firmware
 
 # modules-load.d: load CVI kernel modules at boot via systemd-modules-load
 MODULES_LOAD_DIR="${TARGET_ROOTFS}/etc/modules-load.d"
@@ -792,6 +833,17 @@ EOF
 # Binaries → /usr/bin/ (SDK samples)
 mkdir -p "${TARGET_ROOTFS}/usr/bin"
 [[ -d "${STAGING_DIR}/usr/bin" ]] && cp -a "${STAGING_DIR}/usr/bin/." "${TARGET_ROOTFS}/usr/bin/"
+
+# cvi_sys invokes the BusyBox-compatible `devmem ADDRESS WIDTH VALUE` command
+# to program QoS registers. Its dedicated Makefile owns compiler options.
+echo "Building ARM64 devmem compatibility utility..."
+make -C "${SCRIPT_DIR}/devmem" build \
+    CROSS_COMPILE="${CROSS_COMPILE}" \
+    OUTPUT="${TARGET_ROOTFS}/usr/bin/devmem" || {
+    echo "Failed to build devmem compatibility utility"
+    exit 1
+}
+
 # TDL/AI samples → dedicated dir to avoid polluting /usr/bin
 mkdir -p "${TARGET_ROOTFS}/usr/share/cvitek/samples"
 [[ -d "${STAGING_DIR}/bin" ]] && cp -a "${STAGING_DIR}/bin/." "${TARGET_ROOTFS}/usr/share/cvitek/samples/"
@@ -901,37 +953,34 @@ echo "Run 'cvitek-samples-env' to list available launcher scripts."
 EOF
 chmod 755 "${TARGET_ROOTFS}/usr/bin/cvitek-samples-env"
 
-# ISP / sensor config files
-mkdir -p "${TARGET_ROOTFS}/etc/cvitek"
-[[ -d "${STAGING_DIR}/etc/cvitek" ]] && cp -a "${STAGING_DIR}/etc/cvitek/." "${TARGET_ROOTFS}/etc/cvitek/"
+# Install configuration in /etc. The compatibility links created below make
+# the fixed SDK paths /mnt/data/sensor_cfg.ini and
+# /mnt/cfg/param/cvi_sdr_bin resolve to these same files.
+mkdir -p "${CVITEK_CFG_DIR}"
+[[ -d "${STAGING_DIR}/etc/cvitek" ]] && cp -a "${STAGING_DIR}/etc/cvitek/." "${CVITEK_CFG_DIR}/"
+rm -rf "${CVITEK_DATA_DIR}"
+mkdir -p "${CVITEK_DATA_DIR}" "${CVITEK_CFG_DIR}"
+cp -a device/generic/rootfs_overlay/duos/mnt/data/. "${CVITEK_DATA_DIR}/"
+cp -a device/generic/rootfs_overlay/common/mnt/cfg/. "${CVITEK_CFG_DIR}/"
+ln -sfn sensor_cfg_OV5647_J2.ini "${CVITEK_DATA_DIR}/sensor_cfg.ini"
+ln -sfn cvi_sdr_bin_OV5647.bin "${CVITEK_CFG_DIR}/param/cvi_sdr_bin"
 
-# Sensors configs (two CSI connectors J1 and J2 on Duo S)
-mkdir -p "${TARGET_ROOTFS}/etc/cvitek/sensor"
-if [ -d "device/generic/rootfs_overlay/duos/mnt/data" ]; then
-    cp -v device/generic/rootfs_overlay/duos/mnt/data/*.ini "${TARGET_ROOTFS}/etc/cvitek/sensor/" 2>/dev/null || true
-fi
-ln -sf /etc/cvitek/sensor_cfg_OV5647_J2.ini "${TARGET_ROOTFS}/etc/cvitek/sensor_cfg.ini"
-
-# ISP tuning bin for sensors
-mkdir -p "${TARGET_ROOTFS}/etc/cvitek/param"
-cp -f device/generic/rootfs_overlay/common/mnt/cfg/param/* \
-    "${TARGET_ROOTFS}/etc/cvitek/param/" 2>/dev/null || true
-ln -sf /etc/cvitek/param/cvi_sdr_bin_OV5647.bin "${TARGET_ROOTFS}/etc/cvitek/param/cvi_sdr_bin"
-    
-#cp -f device/generic/rootfs_overlay/duos/mnt/data/sensor_cfg_OV5647_J1.ini \
-#    "${TARGET_ROOTFS}/etc/cvitek/sensor/" 2>/dev/null || true
-#cp -f device/generic/rootfs_overlay/duos/mnt/data/sensor_cfg_OV5647_J2.ini \
-#    "${TARGET_ROOTFS}/etc/cvitek/sensor/" 2>/dev/null || true
-# ISP tuning bin for OV5647
-#mkdir -p "${TARGET_ROOTFS}/etc/cvitek/param"
-#cp -f device/generic/rootfs_overlay/common/mnt/cfg/param/cvi_sdr_bin_OV5647.bin \
-#    "${TARGET_ROOTFS}/etc/cvitek/param/" 2>/dev/null || true
+# FHS aliases are retained for interactive Debian use. /mnt is strictly a
+# compatibility namespace, so it cannot become an independent configuration.
+rm -f "${TARGET_ROOTFS}/etc/cvitek/sensor_cfg.ini"
+ln -sfn sensor/sensor_cfg.ini "${TARGET_ROOTFS}/etc/cvitek/sensor_cfg.ini"
+mkdir -p "${CVITEK_MNT_DIR}"
+rm -rf "${CVITEK_MNT_DIR}/system" "${CVITEK_MNT_DIR}/data" "${CVITEK_MNT_DIR}/cfg"
+ln -sfn /usr/lib/cvitek "${CVITEK_MNT_DIR}/system"
+ln -sfn /etc/cvitek/sensor "${CVITEK_MNT_DIR}/data"
+ln -sfn /etc/cvitek "${CVITEK_MNT_DIR}/cfg"
 
 # Camera test script generation
 cat << 'EOF' > "${TARGET_ROOTFS}/usr/bin/camera-test.sh"
 #!/bin/sh
 # Script de test caméra avec détection faciale pour Debian Trixie
 
+export LD_LIBRARY_PATH=/usr/lib/cvitek/lib:/usr/lib/cvitek/usr/lib:/usr/lib/cvitek/usr/lib/3rd${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
 MODEL_PATH="/usr/share/cvitek/models/scrfd_768_432_int8_1x.cvimodel"
 
 echo "=== Test caméra et TPU (Face Detection) ==="
@@ -1018,7 +1067,8 @@ They are loaded automatically at boot by **systemd-modules-load** via
 \`\`\`
 ldconfig
 \`\`\`
-This makes all Cvitek \`.so\` files (in \`/usr/lib/\` and \`/usr/lib/cvitek/3rd/\`)
+This makes all Cvitek \`.so\` files (in \`/usr/lib/cvitek/lib/\`,
+\`/usr/lib/cvitek/usr/lib/\` and \`/usr/lib/cvitek/usr/lib/3rd/\`)
 visible to the dynamic linker. Already configured via \`/etc/ld.so.conf.d/cvitek.conf\`.
 
 ### 3. Build fiptool for ARM64 (optional — needed to reflash RTOS firmware)
@@ -1057,16 +1107,20 @@ See the **Real-time core** section below for the complete workflow.
 ## Camera (OV5647)
 
 The OV5647 module is supported on both CSI connectors of the Duo S (J1 and J2).
-Sensor config files are in \`/etc/cvitek/sensor/\`:
+Sensor configuration files are in \`/etc/cvitek/sensor/\`:
 - \`sensor_cfg_OV5647_J1.ini\` — CSI connector J1
 - \`sensor_cfg_OV5647_J2.ini\` — CSI connector J2
 
-ISP tuning binary: \`/etc/cvitek/param/cvi_sdr_bin_OV5647.bin\`
+The default image selects J2 and uses the matching ISP tuning binary through:
+\`/etc/cvitek/param/cvi_sdr_bin\` -> \`cvi_sdr_bin_OV5647.bin\`.
+For compatibility with middleware that embeds vendor paths, \`/mnt/system\`,
+\`/mnt/data\` and \`/mnt/cfg\` are symlinks to \`/usr/lib/cvitek\`,
+\`/etc/cvitek/sensor\` and \`/etc/cvitek\`, respectively.
 
 ### Quick camera test
 \`\`\`bash
-# Set the sensor config (adjust path for J1 or J2)
-export SENSOR_CFG=/etc/cvitek/sensor/sensor_cfg_OV5647_J2.ini
+# Select J1 instead, if required
+ln -sfn sensor_cfg_OV5647_J1.ini /etc/cvitek/sensor/sensor_cfg.ini
 /usr/bin/sample_vio
 \`\`\`
 
@@ -1365,7 +1419,7 @@ echo ""
 echo "Kernel version: ${KERNEL_VER}"
 echo "Modules installed in: ${TARGET_ROOTFS}/lib/modules/${KERNEL_VER}/extra/cvitek/"
 echo "AIC8800 firmware installed in: ${TARGET_ROOTFS}/lib/firmware/aic8800/"
-echo "Libraries installed in: ${TARGET_ROOTFS}/usr/lib/"
+echo "Libraries installed in: ${TARGET_ROOTFS}/usr/lib/cvitek/lib/"
 echo "README: ${TARGET_ROOTFS}/usr/share/cvitek/README.md"
 if [[ "${SKIP_SOPHGO_TDL_MODELS}" != "1" ]]; then
     echo "Sophgo cv181x models installed in: ${TARGET_ROOTFS}/usr/share/cvitek/models/tdl_models/"
